@@ -184,6 +184,13 @@ void MinecraftInstance::loadSpecificSettings()
         m_settings->registerOverride(global_settings->getSetting("CloseAfterLaunch"), miscellaneousOverride);
         m_settings->registerOverride(global_settings->getSetting("QuitAfterGameStop"), miscellaneousOverride);
 
+        // Legacy-related options
+        auto legacySettings = m_settings->registerSetting("OverrideLegacySettings", false);
+        m_settings->registerOverride(global_settings->getSetting("OnlineFixes"), legacySettings);
+
+        auto envSetting = m_settings->registerSetting("OverrideEnv", false);
+        m_settings->registerOverride(global_settings->getSetting("Env"), envSetting);
+
         m_settings->set("InstanceType", "OneSix");
     }
 
@@ -513,18 +520,26 @@ QStringList MinecraftInstance::javaArguments()
 
     args << "-Duser.language=en";
 
+    if (javaVersion.isModular() && shouldApplyOnlineFixes())
+        // allow reflective access to java.net - required by the skin fix
+        args << "--add-opens"
+             << "java.base/java.net=ALL-UNNAMED";
+
     return args;
 }
 
 QString MinecraftInstance::getLauncher()
 {
-    auto profile = m_components->getProfile();
-
     // use legacy launcher if the traits are set
-    if (profile->getTraits().contains("legacyLaunch") || profile->getTraits().contains("alphaLaunch"))
+    if (traits().contains("legacyLaunch") || traits().contains("alphaLaunch"))
         return "legacy";
 
     return "standard";
+}
+
+bool MinecraftInstance::shouldApplyOnlineFixes()
+{
+    return traits().contains("legacyServices") && settings()->get("OnlineFixes").toBool();
 }
 
 QMap<QString, QString> MinecraftInstance::getVariables()
@@ -536,6 +551,7 @@ QMap<QString, QString> MinecraftInstance::getVariables()
     out.insert("INST_MC_DIR", QDir::toNativeSeparators(QDir(gameRoot()).absolutePath()));
     out.insert("INST_JAVA", settings()->get("JavaPath").toString());
     out.insert("INST_JAVA_ARGS", javaArguments().join(' '));
+    out.insert("NO_COLOR", "1");
     return out;
 }
 
@@ -585,6 +601,23 @@ QProcessEnvironment MinecraftInstance::createLaunchEnvironment()
         env.insert("__GLX_VENDOR_LIBRARY_NAME", "nvidia");
     }
 #endif
+
+    // custom env
+
+    auto insertEnv = [&env](QMap<QString, QVariant> envMap) {
+        if (envMap.isEmpty())
+            return;
+
+        for (auto iter = envMap.begin(); iter != envMap.end(); iter++)
+            env.insert(iter.key(), iter.value().toString());
+    };
+
+    bool overrideEnv = settings()->get("OverrideEnv").toBool();
+
+    if (!overrideEnv)
+        insertEnv(APPLICATION->settings()->get("Env").toMap());
+    else
+        insertEnv(settings()->get("Env").toMap());
 
     return env;
 }
@@ -698,12 +731,25 @@ QString MinecraftInstance::createLaunchScript(AuthSessionPtr session, MinecraftS
     {
         QString windowParams;
         if (settings()->get("LaunchMaximized").toBool())
-            windowParams = "max";
+            windowParams = "maximized";
         else
             windowParams =
                 QString("%1x%2").arg(settings()->get("MinecraftWinWidth").toInt()).arg(settings()->get("MinecraftWinHeight").toInt());
         launchScript += "windowTitle " + windowTitle() + "\n";
         launchScript += "windowParams " + windowParams + "\n";
+    }
+
+    // launcher info
+    {
+        launchScript += "launcherBrand " + BuildConfig.LAUNCHER_NAME + "\n";
+        launchScript += "launcherVersion " + BuildConfig.printableVersionString() + "\n";
+    }
+
+    // instance info
+    {
+        launchScript += "instanceName " + name() + "\n";
+        launchScript += "instanceIconKey " + name() + "\n";
+        launchScript += "instanceIconPath icon.png\n";  // we already save a copy here
     }
 
     // legacy auth
@@ -715,6 +761,9 @@ QString MinecraftInstance::createLaunchScript(AuthSessionPtr session, MinecraftS
     for (auto trait : profile->getTraits()) {
         launchScript += "traits " + trait + "\n";
     }
+
+    if (shouldApplyOnlineFixes())
+        launchScript += "onlineFixes true\n";
 
     launchScript += "launcher " + getLauncher() + "\n";
 
