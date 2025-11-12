@@ -13,7 +13,6 @@
 #include "modplatform/EnsureMetadataTask.h"
 #include "modplatform/helpers/OverrideUtils.h"
 
-#include "modplatform/modrinth/ModrinthPackManifest.h"
 #include "net/ChecksumValidator.h"
 
 #include "net/ApiDownload.h"
@@ -85,7 +84,7 @@ bool ModrinthCreationTask::updateInstance()
     QString old_index_path(FS::PathCombine(old_index_folder, "modrinth.index.json"));
     QFileInfo old_index_file(old_index_path);
     if (old_index_file.exists()) {
-        std::vector<Modrinth::File> old_files;
+        std::vector<File> old_files;
         parseManifest(old_index_path, old_files, false, false);
 
         // Let's remove all duplicated, identical resources!
@@ -121,6 +120,11 @@ bool ModrinthCreationTask::updateInstance()
                     continue;
                 qDebug() << "Scheduling" << file.path << "for removal";
                 m_files_to_remove.append(old_minecraft_dir.absoluteFilePath(file.path));
+                if (file.path.endsWith(".disabled")) {  // remove it if it was enabled/disabled by user
+                    m_files_to_remove.append(old_minecraft_dir.absoluteFilePath(file.path.chopped(9)));
+                } else {
+                    m_files_to_remove.append(old_minecraft_dir.absoluteFilePath(file.path + ".disabled"));
+                }
             }
         }
 
@@ -245,7 +249,7 @@ bool ModrinthCreationTask::createInstance()
     auto root_modpack_url = QUrl::fromLocalFile(root_modpack_path);
     // TODO make this work with other sorts of resource
     QHash<QString, Resource*> resources;
-    for (auto file : m_files) {
+    for (auto& file : m_files) {
         auto fileName = file.path;
         fileName = FS::RemoveInvalidPathChars(fileName);
         auto file_path = FS::PathCombine(root_modpack_path, fileName);
@@ -262,12 +266,14 @@ bool ModrinthCreationTask::createInstance()
             mod->setDetails(d);
             resources[file.hash.toHex()] = mod;
         }
-
+        if (file.downloads.empty()) {
+            setError(tr("The file '%1' is missing a download link. This is invalid in the pack format.").arg(fileName));
+            return false;
+        }
         qDebug() << "Will try to download" << file.downloads.front() << "to" << file_path;
         auto dl = Net::ApiDownload::makeFile(file.downloads.dequeue(), file_path);
         dl->addValidator(new Net::ChecksumValidator(file.hashAlgorithm, file.hash));
         downloadMods->addNetAction(dl);
-
         if (!file.downloads.empty()) {
             // FIXME: This really needs to be put into a ConcurrentTask of
             // MultipleOptionsTask's , once those exist :)
@@ -349,7 +355,7 @@ bool ModrinthCreationTask::createInstance()
 }
 
 bool ModrinthCreationTask::parseManifest(const QString& index_path,
-                                         std::vector<Modrinth::File>& files,
+                                         std::vector<File>& files,
                                          bool set_internal_data,
                                          bool show_optional_dialog)
 {
@@ -370,9 +376,9 @@ bool ModrinthCreationTask::parseManifest(const QString& index_path,
             }
 
             auto jsonFiles = Json::requireIsArrayOf<QJsonObject>(obj, "files", "modrinth.index.json");
-            std::vector<Modrinth::File> optionalFiles;
+            std::vector<File> optionalFiles;
             for (const auto& modInfo : jsonFiles) {
-                Modrinth::File file;
+                File file;
                 file.path = Json::requireString(modInfo, "path").replace("\\", "/");
 
                 auto env = Json::ensureObject(modInfo, "env");
@@ -414,23 +420,30 @@ bool ModrinthCreationTask::parseManifest(const QString& index_path,
             }
 
             if (!optionalFiles.empty()) {
-                QStringList oFiles;
-                for (auto file : optionalFiles)
-                    oFiles.push_back(file.path);
-                OptionalModDialog optionalModDialog(m_parent, oFiles);
-                if (optionalModDialog.exec() == QDialog::Rejected) {
-                    emitAborted();
-                    return false;
-                }
-
-                auto selectedMods = optionalModDialog.getResult();
-                for (auto file : optionalFiles) {
-                    if (selectedMods.contains(file.path)) {
-                        file.required = true;
-                    } else {
-                        file.path += ".disabled";
+                if (show_optional_dialog) {
+                    QStringList oFiles;
+                    for (auto file : optionalFiles)
+                        oFiles.push_back(file.path);
+                    OptionalModDialog optionalModDialog(m_parent, oFiles);
+                    if (optionalModDialog.exec() == QDialog::Rejected) {
+                        emitAborted();
+                        return false;
                     }
-                    files.push_back(file);
+
+                    auto selectedMods = optionalModDialog.getResult();
+                    for (auto file : optionalFiles) {
+                        if (selectedMods.contains(file.path)) {
+                            file.required = true;
+                        } else {
+                            file.path += ".disabled";
+                        }
+                        files.push_back(file);
+                    }
+                } else {
+                    for (auto file : optionalFiles) {
+                        file.path += ".disabled";
+                        files.push_back(file);
+                    }
                 }
             }
             if (set_internal_data) {

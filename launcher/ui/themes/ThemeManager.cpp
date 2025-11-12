@@ -36,6 +36,9 @@
 
 ThemeManager::ThemeManager()
 {
+    QIcon::setFallbackThemeName(QIcon::themeName());
+    QIcon::setThemeSearchPaths(QIcon::themeSearchPaths() << m_iconThemeFolder.path());
+
     themeDebugLog() << "Determining System Widget Theme...";
     const auto& style = QApplication::style();
     m_defaultStyle = style->objectName();
@@ -45,6 +48,11 @@ ThemeManager::ThemeManager()
 
     initializeThemes();
     initializeCatPacks();
+}
+
+ThemeManager::~ThemeManager()
+{
+    stopSettingNewWindowColorsOnMac();
 }
 
 /// @brief Adds the Theme to the list of themes
@@ -92,10 +100,6 @@ void ThemeManager::initializeIcons()
     // TODO: icon themes and instance icons do not mesh well together. Rearrange and fix discrepancies!
     // set icon theme search path!
     themeDebugLog() << "<> Initializing Icon Themes";
-
-    auto searchPaths = QIcon::themeSearchPaths();
-    searchPaths.append(m_iconThemeFolder.path());
-    QIcon::setThemeSearchPaths(searchPaths);
 
     for (const QString& id : builtinIcons) {
         IconTheme theme(id, QString(":/icons/%1").arg(id));
@@ -175,6 +179,15 @@ void ThemeManager::initializeWidgets()
     themeDebugLog() << "<> Widget themes initialized.";
 }
 
+#ifndef Q_OS_MACOS
+void ThemeManager::setTitlebarColorOnMac(WId windowId, QColor color)
+{}
+void ThemeManager::setTitlebarColorOfAllWindowsOnMac(QColor color)
+{}
+void ThemeManager::stopSettingNewWindowColorsOnMac()
+{}
+#endif
+
 QList<IconTheme*> ThemeManager::getValidIconThemes()
 {
     QList<IconTheme*> ret;
@@ -248,6 +261,7 @@ void ThemeManager::setApplicationTheme(const QString& name, bool initial)
         auto& theme = themeIter->second;
         themeDebugLog() << "applying theme" << theme->name();
         theme->apply(initial);
+        setTitlebarColorOfAllWindowsOnMac(qApp->palette().window().color());
 
         m_logColors = theme->logColorScheme();
     } else {
